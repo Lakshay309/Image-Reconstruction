@@ -1,0 +1,151 @@
+{
+  "args": {
+    "dataset": "cifar10",
+    "data_root": "./data",
+    "image": "C:\\Users\\lakshay\\Downloads\\Original-test-image-128-128-pixels.png",
+    "fit": "crop",
+    "n_images": 8,
+    "size": 256,
+    "color": true,
+    "missing": 0.4,
+    "mask": "block",
+    "block_size": 8,
+    "sigma": 0.05,
+    "seed": 0,
+    "device": "auto",
+    "lam_ftv": 0.08,
+    "ftv_iters": 400,
+    "lam0": 0.12,
+    "kappa": 0.05,
+    "n_outer": 6,
+    "n_inner": 150,
+    "pilot_iters": 300,
+    "grad_sigma": 0.0,
+    "tune": false,
+    "n_tune": 4,
+    "ftv_grid": [
+      0.02,
+      0.04,
+      0.06,
+      0.08,
+      0.12,
+      0.16
+    ],
+    "atv_lam_grid": [
+      0.06,
+      0.1,
+      0.15,
+      0.22
+    ],
+    "atv_kappa_grid": [
+      0.02,
+      0.05,
+      0.1
+    ],
+    "hybrid": true,
+    "dip_iters": 800,
+    "dip_lr": 0.01,
+    "out": "results"
+  },
+  "selected": {
+    "lam_ftv": 0.08,
+    "lam0": 0.12,
+    "kappa": 0.05
+  },
+  "atv_objective_history": [
+    180.96096801757812,
+    179.9267578125,
+    179.508544921875,
+    179.33016967773438,
+    179.20191955566406,
+    179.11813354492188
+  ],
+  "metrics": {
+    "Nearest fill": {
+      "psnr": {
+        "mean": 25.428166278528757,
+        "std": 0.0
+      },
+      "ssim": {
+        "mean": 0.3474333376742757,
+        "std": 0.0
+      },
+      "edge_psnr": {
+        "mean": 22.887202298398222,
+        "std": 0.0
+      }
+    },
+    "Fixed TV": {
+      "psnr": {
+        "mean": 35.96929822099605,
+        "std": 0.0
+      },
+      "ssim": {
+        "mean": 0.9670125188540251,
+        "std": 0.0
+      },
+      "edge_psnr": {
+        "mean": 27.472499561199474,
+        "std": 0.0
+      }
+    },
+    "Adaptive TV": {
+      "psnr": {
+        "mean": 33.3701559842161,
+        "std": 0.0
+      },
+      "ssim": {
+        "mean": 0.9501825965413113,
+        "std": 0.0
+      },
+      "edge_psnr": {
+        "mean": 24.246603806922522,
+        "std": 0.0
+      }
+    },
+    "Adaptive TV + DIP": {
+      "psnr": {
+        "mean": 33.80914883092449,
+        "std": 0.0
+      },
+      "ssim": {
+        "mean": 0.9487396688771917,
+        "std": 0.0
+      },
+      "edge_psnr": {
+        "mean": 26.277943417645186,
+        "std": 0.0
+      }
+    }
+  },
+  "per_image": {
+    "Original-test-image-128-128-pixels": {
+      "Nearest fill": {
+        "psnr": 25.428166278528757,
+        "ssim": 0.3474333376742757,
+        "edge_psnr": 22.887202298398222
+      },
+      "Fixed TV": {
+        "psnr": 35.96929822099605,
+        "ssim": 0.9670125188540251,
+        "edge_psnr": 27.472499561199474
+      },
+      "Adaptive TV": {
+        "psnr": 33.3701559842161,
+        "ssim": 0.9501825965413113,
+        "edge_psnr": 24.246603806922522
+      },
+      "Adaptive TV + DIP": {
+        "psnr": 33.80914883092449,
+        "ssim": 0.9487396688771917,
+        "edge_psnr": 26.277943417645186
+      }
+    }
+  },
+  "time_s": {
+    "Nearest fill": 0.016510725021362305,
+    "Fixed TV": 0.4333658218383789,
+    "Adaptive TV": 1.0379111766815186,
+    "Adaptive TV + DIP": 14.842973470687866
+  }
+}

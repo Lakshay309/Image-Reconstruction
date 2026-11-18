@@ -1,0 +1,15 @@
+"C:\Users\lakshay\Downloads\images.png"
+# one image, 128x128, 50% random pixels missing
+python train_or_run.py --image my_photo.jpg --size 128 --missing 0.5 --tune
+
+# a whole folder (Set12, BSD68 crops, your photos ...), keep the full picture by padding
+python train_or_run.py --image D:/pics/Set12 --n_images 12 --fit pad --size 128 --tune
+
+# colour, block holes, plus the neural-prior hybrid
+python train_or_run.py --image C:\Users\lakshay\Downloads\images.png --color --mask block --missing 0.4 --hybrid
+
+"C:\Users\lakshay\Downloads\Original-test-image-128-128-pixels.png"
+python train_or_run.py --image 
+
+
+C:\Users\lakshay\Downloads\Original-test-image-128-128-pixels.png --color --mask block --missing 0.4 --hybrid --size 128
