@@ -49,22 +49,51 @@ class SmallUNet(nn.Module):
         self.depth = depth
         ch = [base * 2 ** i for i in range(depth + 1)] # e.g. [16, 32, 64, 128]
         
-        self.enc = nn.ModuleList([_Block(in_ch, ch[0])] +
-                                [_Block(ch[i - 1], ch[i]) for i in range(1, depth + 1)])
-        self.dec = nn.ModuleList([_Block(ch[i] + ch[i - 1], ch[i - 1]) for i in range(depth, 0, -1)])
+        self.enc = nn.ModuleList(
+            [ _Block(in_ch, ch[0])] +
+            [
+                _Block(ch[i - 1], ch[i])
+                for i in range(1, depth + 1)
+            ]
+        )
+        
+        self.dec = nn.ModuleList(
+            [
+                _Block(ch[i] + ch[i - 1], ch[i - 1])
+                for i in range(depth, 0, -1)
+            ]
+        )
+        
         self.pool = nn.AvgPool2d(2)
         self.out = nn.Conv2d(ch[0], out_ch, 1)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         assert z.shape[-1] % 2 ** self.depth == 0 and z.shape[-2] % 2 ** self.depth == 0, \
             "H and W must be divisible by 2**depth"
-        skips, h = [], z
+            
+        skips = []
+        h = z
+        
         for i, blk in enumerate(self.enc):
             h = blk(h)
+            
             if i < self.depth:
                 skips.append(h)
                 h = self.pool(h)
+        
         for blk in self.dec:
-            h = F.interpolate(h, scale_factor=2, mode="bilinear", align_corners=False)
-            h = blk(torch.cat([h, skips.pop()], dim=1))
-        return torch.sigmoid(self.out(h))                                 # image in (0, 1)
+            
+            h = F.interpolate(
+                h,
+                scale_factor=2,
+                mode="bilinear",
+                align_corners=False
+            )
+            
+            h = blk(
+                torch.cat(
+                    [h, skips.pop()], 
+                    dim=1
+                )
+            )
+        return torch.sigmoid(self.out(h)) # image in (0, 1)
