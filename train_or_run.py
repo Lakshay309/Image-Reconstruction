@@ -1,185 +1,407 @@
 #!/usr/bin/env python
-"""train_or_run.py -- end-to-end experiment: load -> degrade -> reconstruct -> evaluate -> plot.
-
-Methods compared
-    Nearest fill        (reference: copy nearest observed pixel)
-    Fixed TV            (baseline, lambda grid-tuned if --tune)
-    Adaptive TV         (iteratively reweighted TV / MM; lam0, kappa grid-tuned if --tune)
-    Adaptive TV + DIP   (only with --hybrid; U-Net prior + adaptive-TV penalty)
-
-Examples
-    python train_or_run.py --dataset skimage --n_images 8 --tune
-    python train_or_run.py --image my_photo.jpg --size 128 --missing 0.5 --tune
-    python train_or_run.py --image D:/pics/ --n_images 20 --fit pad --hybrid
-    python train_or_run.py --dataset stl10 --missing 0.6 --mask mixed --tune --hybrid
+"""
+Image Reconstruction Pipeline
+Workflow:
+    1. Load images
+    2. Degrade images
+    3. Tune parameters (optional)
+    4. Reconstruct images
+    5. Evaluate results
+    6. Save visualizations and metrics
 """
 from __future__ import annotations
-
 import argparse
 import json
 import os
 import time
 from collections import OrderedDict
-
 import numpy as np
 import torch
-
-from dataset import load_images, load_user_images
+from dataset import load_user_images
 from degradation import degrade
 from metrics import evaluate, psnr, summarize
-from solver import (adaptive_tv, adaptive_weights, dip_adaptive_tv, fixed_tv, nearest_fill)
-from visualize import plot_comparison_grid, plot_row_profile, plot_weight_map, save_individual
-
-
+from solver import (
+    adaptive_tv,
+    dip_adaptive_tv,
+    fixed_tv,
+    nearest_fill,
+)
+from visualize import (
+    plot_comparison_grid,
+    plot_row_profile,
+    plot_weight_map,
+    save_individual,
+)
+# 1. COMMAND-LINE ARGUMENTS
 def parse_args():
-    p = argparse.ArgumentParser(description="Adaptive TV image recovery from incomplete information")
-    p.add_argument("--dataset", default="cifar10", choices=["cifar10", "stl10", "skimage"])
-    p.add_argument("--data_root", default="./data")
-    p.add_argument("--image", default=None,
-                    help="path to YOUR image file or a folder of images (overrides --dataset)")
-    p.add_argument("--fit", default="crop", choices=["crop", "pad"],
-                    help="make user images square by centre-cropping or edge-padding")
-    p.add_argument("--n_images", type=int, default=8)
-    p.add_argument("--size", type=int, default=64)
-    p.add_argument("--color", action="store_true", help="use RGB (default: grayscale)")
-    p.add_argument("--missing", type=float, default=0.5, help="fraction of missing pixels")
-    p.add_argument("--mask", default="random", choices=["random", "block", "mixed"])
-    p.add_argument("--block_size", type=int, default=8)
-    p.add_argument("--sigma", type=float, default=0.05, help="noise std on observed pixels")
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
-    # FTV
-    p.add_argument("--lam_ftv", type=float, default=0.08)
-    p.add_argument("--ftv_iters", type=int, default=400)
-    # ATV
-    p.add_argument("--lam0", type=float, default=0.12)
-    p.add_argument("--kappa", type=float, default=0.05)
-    p.add_argument("--n_outer", type=int, default=6)
-    p.add_argument("--n_inner", type=int, default=150)
-    p.add_argument("--pilot_iters", type=int, default=300)
-    p.add_argument("--grad_sigma", type=float, default=0.0, help="Gaussian pre-smoothing of the pilot gradient")
-    # tuning (on held-out images, so the baseline is as strong as possible)
-    p.add_argument("--tune", action="store_true")
-    p.add_argument("--n_tune", type=int, default=4)
-    p.add_argument("--ftv_grid", type=float, nargs="+", default=[0.02, 0.04, 0.06, 0.08, 0.12, 0.16])
-    p.add_argument("--atv_lam_grid", type=float, nargs="+", default=[0.06, 0.10, 0.15, 0.22])
-    p.add_argument("--atv_kappa_grid", type=float, nargs="+", default=[0.02, 0.05, 0.10])
-    # hybrid
-    p.add_argument("--hybrid", action="store_true", help="also run Adaptive TV + Deep Image Prior")
-    p.add_argument("--dip_iters", type=int, default=800)
-    p.add_argument("--dip_lr", type=float, default=1e-2)
-    p.add_argument("--out", default="results")
-    return p.parse_args()
-
-
-def tune(Xt, Yt, Mt, a, dev):
-    """Grid-search FTV lambda, then (lam0, kappa) for ATV, maximising mean PSNR on held-out images."""
-    Yt, Mt = Yt.to(dev), Mt.to(dev)
-    best_f = (-1.0, a.lam_ftv)
-    for lam in a.ftv_grid:
-        s = psnr(Xt, fixed_tv(Yt, Mt, lam, a.ftv_iters).cpu()).mean()
-        print(f"  [tune] FTV lam={lam:.3f}                PSNR={s:.2f}")
-        if s > best_f[0]:
-            best_f = (s, lam)
-    best_a = (-1.0, a.lam0, a.kappa)
-    for lam0 in a.atv_lam_grid:
-        for kap in a.atv_kappa_grid:
-            xh, _, _ = adaptive_tv(Yt, Mt, lam0, kap, a.n_outer, a.n_inner, a.grad_sigma,
-                                    best_f[1], a.pilot_iters)
-            s = psnr(Xt, xh.cpu()).mean()
-            print(f"  [tune] ATV lam0={lam0:.3f} kappa={kap:.3f}  PSNR={s:.2f}")
-            if s > best_a[0]:
-                best_a = (s, lam0, kap)
-    return best_f[1], best_a[1], best_a[2]
-
-
-def main():
-    a = parse_args()
-    torch.manual_seed(a.seed)
-    np.random.seed(a.seed)
-    dev = torch.device("cuda" if (a.device == "auto" and torch.cuda.is_available()) or a.device == "cuda" else "cpu")
-    os.makedirs(a.out, exist_ok=True)
-    src = f"image={a.image}" if a.image else f"dataset={a.dataset}"
-    print(f"device={dev} {src} n={a.n_images} size={a.size} missing={a.missing} "
-        f"mask={a.mask} sigma={a.sigma}")
-
-    if a.image:
-        X, names = load_user_images(a.image, a.n_images, a.size, gray=not a.color, fit=a.fit)
-        # your own image(s) are never used for tuning: use bundled sample photos instead
-        X_tune = load_images("skimage", a.n_tune, a.size, gray=not a.color) if a.tune else X[:0]
-        print(f"Loaded {len(X)} image(s) -> {tuple(X.shape[1:])}: {', '.join(names)}")
-    else:
-        total = a.n_images + (a.n_tune if a.tune else 0)
-        X_all = load_images(a.dataset, total, a.size, gray=not a.color, root=a.data_root)
-        X, X_tune = X_all[:a.n_images], X_all[a.n_images:]
-        names = [f"img{i:02d}" for i in range(len(X))]
-    Y, M = degrade(X, a.missing, a.sigma, a.mask, a.block_size, a.seed)
-
-    lam_ftv, lam0, kappa = a.lam_ftv, a.lam0, a.kappa
-    if a.tune and len(X_tune) > 0:
-        print("Tuning hyper-parameters on held-out images ...")
-        Yt, Mt = degrade(X_tune, a.missing, a.sigma, a.mask, a.block_size, a.seed + 1)
-        lam_ftv, lam0, kappa = tune(X_tune, Yt, Mt, a, dev)
-        print(f"Selected: lam_ftv={lam_ftv}, lam0={lam0}, kappa={kappa}")
-
-    Yd, Md = Y.to(dev), M.to(dev)
-    recon, times = OrderedDict(), {}
-
-    t0 = time.time()
-    nf = nearest_fill(Yd, Md).clamp(0, 1).cpu()
-    times["Nearest fill"] = time.time() - t0
-
-    t0 = time.time()
-    xf = fixed_tv(Yd, Md, lam_ftv, a.ftv_iters)
-    times["Fixed TV"] = time.time() - t0
-
-    t0 = time.time()
-    xa, W, hist = adaptive_tv(Yd, Md, lam0, kappa, a.n_outer, a.n_inner, a.grad_sigma, lam_ftv, a.pilot_iters)
-    times["Adaptive TV"] = time.time() - t0
-    print("ATV objective per outer iteration (nonconvex, should decrease):",
-        " -> ".join(f"{h:.3f}" for h in hist))
-
-    recon["Fixed TV"], recon["Adaptive TV"] = xf.cpu(), xa.cpu()
-    if a.hybrid:
-        t0 = time.time()
-        xd = dip_adaptive_tv(Yd, Md, xa, lam0, kappa, n_iter=a.dip_iters, lr=a.dip_lr,
-                            grad_sigma=a.grad_sigma, device=dev, seed=a.seed)
-        times["Adaptive TV + DIP"] = time.time() - t0
-        recon["Adaptive TV + DIP"] = xd.cpu()
-
-    results = OrderedDict([("Nearest fill", evaluate(X, nf))])
-    for k, v in recon.items():
-        results[k] = evaluate(X, v)
-    print("\n" + summarize(results, times))
-
-    # ---- figures
-    plot_comparison_grid(X, Y, recon, results, os.path.join(a.out, "comparison_grid.png"),
-                        n_show=min(len(X), 8))
-    save_individual(os.path.join(a.out, "images"), names, X, Y, {"Nearest fill": nf, **recon})
-    plot_weight_map(xa.cpu()[0], W.cpu()[0], os.path.join(a.out, "lambda_map.png"))
-    # profile along the row of image 0 with the most horizontal-gradient energy (crosses many edges)
-    row_energy = torch.abs(X[0, :, :, 1:] - X[0, :, :, :-1]).sum(dim=(0, 2))   # (H,)
+    parser = argparse.ArgumentParser(
+        description="Image reconstruction using TV and Deep Image Prior"
+    )
+    # Image input
+    image_group = parser.add_argument_group("Image input")
+    image_group.add_argument(
+        "--image",
+        required=True,
+        help="Path to an image file or directory containing images"
+    )
+    image_group.add_argument("--n_images", type=int, default=None)
+    image_group.add_argument("--size", type=int, default=64)
+    image_group.add_argument("--color", action="store_true")
+    image_group.add_argument(
+        "--fit",
+        default="crop",
+        choices=["crop", "pad"]
+    )
+    # Image degradation
+    degradation_group = parser.add_argument_group("Image degradation")
+    degradation_group.add_argument(
+        "--missing",
+        type=float,
+        default=0.20,
+        help="Fraction of pixels to remove (default: 0.20)"
+    )
+    degradation_group.add_argument(
+        "--mask",
+        default="random",
+        choices=["random", "block", "mixed"]
+    )
+    degradation_group.add_argument(
+        "--sigma",
+        type=float,
+        default=0.01,
+        help="Gaussian noise standard deviation (default: 0.01)"
+    )
+    degradation_group.add_argument(
+        "--block_size",
+        type=int,
+        default=None,
+        help="Block side length in pixels (default: automatic)"
+    )
+    # Execution
+    execution_group = parser.add_argument_group("Execution")
+    execution_group.add_argument("--seed", type=int, default=0)
+    execution_group.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cpu", "cuda"]
+    )
+    execution_group.add_argument("--out", default="results")
+    # Fixed TV
+    ftv_group = parser.add_argument_group("Fixed TV")
+    ftv_group.add_argument("--lam_ftv", type=float, default=0.08)
+    ftv_group.add_argument("--ftv_iters", type=int, default=400)
+    # Adaptive TV
+    atv_group = parser.add_argument_group("Adaptive TV")
+    atv_group.add_argument("--lam0", type=float, default=0.12)
+    atv_group.add_argument("--kappa", type=float, default=0.05)
+    atv_group.add_argument("--n_outer", type=int, default=6)
+    atv_group.add_argument("--n_inner", type=int, default=150)
+    atv_group.add_argument("--pilot_iters", type=int, default=300)
+    atv_group.add_argument("--grad_sigma", type=float, default=0.0)
+    # Deep Image Prior
+    dip_group = parser.add_argument_group("Deep Image Prior")
+    dip_group.add_argument("--hybrid", action="store_true")
+    dip_group.add_argument("--dip_iters", type=int, default=800)
+    dip_group.add_argument("--dip_lr", type=float, default=1e-2)
+    # Validate arguments
+    args = parser.parse_args()
+    if not 0 <= args.missing <= 0.9:
+        parser.error("--missing must be between 0 and 0.9")
+    if args.sigma < 0:
+        parser.error("--sigma cannot be negative")
+    if args.block_size is not None and args.block_size < 2:
+        parser.error("--block_size must be at least 2")
+    if args.dip_lr <= 0:
+        parser.error("--dip_lr must be positive")
+    positive_args = [
+        "size",
+        "ftv_iters",
+        "n_outer",
+        "n_inner",
+        "pilot_iters",
+        "dip_iters",
+    ]
+    for name in positive_args:
+        if getattr(args, name) <= 0:
+            parser.error(f"--{name} must be positive")
+    if args.n_images is not None and args.n_images <= 0:
+        parser.error("--n_images must be positive")
+    return args
+# 2. PARAMETER TUNING
+def tune_parameters(X, Y, M, args, device):
+    Y = Y.to(device)
+    M = M.to(device)
+    # Tune Fixed TV
+    best_ftv_score = -1.0
+    best_ftv_lambda = args.lam_ftv
+    for lam in args.ftv_grid:
+        reconstruction = fixed_tv(
+            Y, M, lam, args.ftv_iters
+        ).cpu()
+        score = psnr(X, reconstruction).mean()
+        print(
+            f"[FTV] lambda={lam:.3f} | "
+            f"PSNR={score:.2f}"
+        )
+        if score > best_ftv_score:
+            best_ftv_score = score
+            best_ftv_lambda = lam
+    # Tune Adaptive TV
+    best_atv_score = -1.0
+    best_lam0 = args.lam0
+    best_kappa = args.kappa
+    for lam0 in args.atv_lam_grid:
+        for kappa in args.atv_kappa_grid:
+            reconstruction, _, _ = adaptive_tv(
+                Y,
+                M,
+                lam0,
+                kappa,
+                args.n_outer,
+                args.n_inner,
+                args.grad_sigma,
+                best_ftv_lambda,
+                args.pilot_iters,
+            )
+            score = psnr(X, reconstruction.cpu()).mean()
+            print(
+                f"[ATV] lambda0={lam0:.3f} | "
+                f"kappa={kappa:.3f} | "
+                f"PSNR={score:.2f}"
+            )
+            if score > best_atv_score:
+                best_atv_score = score
+                best_lam0 = lam0
+                best_kappa = kappa
+    return best_ftv_lambda, best_lam0, best_kappa
+# 3. IMAGE LOADING
+def load_input_data(args):
+    images, names = load_user_images(
+        path=args.image,
+        n=args.n_images,
+        size=args.size,
+        gray=not args.color,
+        fit=args.fit,
+    )
+    if len(images) == 0:
+        raise ValueError(
+            f"No supported images found at: {args.image}"
+        )
+    return images, names
+# 4. IMAGE RECONSTRUCTION
+def reconstruct_images(Y, M, args, device):
+    Y = Y.to(device)
+    M = M.to(device)
+    reconstructions = OrderedDict()
+    timings = {}
+    # Nearest fill
+    start = time.time()
+    nearest = nearest_fill(Y, M).clamp(0, 1).cpu()
+    timings["Nearest fill"] = time.time() - start
+    # Fixed TV
+    start = time.time()
+    fixed, = (fixed_tv(
+        Y, M, args.lam_ftv, args.ftv_iters
+    ),)
+    reconstructions["Fixed TV"] = fixed.cpu()
+    timings["Fixed TV"] = time.time() - start
+    # Adaptive TV
+    start = time.time()
+    adaptive, weights, history = adaptive_tv(
+        Y,
+        M,
+        args.lam0,
+        args.kappa,
+        args.n_outer,
+        args.n_inner,
+        args.grad_sigma,
+        args.lam_ftv,
+        args.pilot_iters,
+    )
+    reconstructions["Adaptive TV"] = adaptive.cpu()
+    timings["Adaptive TV"] = time.time() - start
+    # Adaptive TV + DIP
+    if args.hybrid:
+        start = time.time()
+        hybrid = dip_adaptive_tv(
+            Y,
+            M,
+            adaptive,
+            args.lam0,
+            args.kappa,
+            n_iter=args.dip_iters,
+            lr=args.dip_lr,
+            grad_sigma=args.grad_sigma,
+            device=device,
+            seed=args.seed,
+        )
+        reconstructions["Adaptive TV + DIP"] = hybrid.cpu()
+        timings["Adaptive TV + DIP"] = time.time() - start
+    return nearest, reconstructions, timings, weights, history
+# 5. EVALUATION
+def evaluate_reconstructions(images, nearest, reconstructions):
+    results = OrderedDict()
+    results["Nearest fill"] = evaluate(images, nearest)
+    for name, reconstruction in reconstructions.items():
+        results[name] = evaluate(images, reconstruction)
+    return results
+# 6. VISUALIZATION AND SAVING
+def save_results(
+    images,
+    observations,
+    names,
+    reconstructions,
+    nearest,
+    results,
+    weights,
+    args,
+):
+    os.makedirs(args.out, exist_ok=True)
+    # Comparison grid
+    plot_comparison_grid(
+        images,
+        observations,
+        reconstructions,
+        results,
+        os.path.join(args.out, "comparison_grid.png"),
+        n_show=min(len(images), 8),
+    )
+    # Individual images
+    save_individual(
+        os.path.join(args.out, "images"),
+        names,
+        images,
+        observations,
+        {
+            "Nearest fill": nearest,
+            **reconstructions,
+        },
+    )
+    # Adaptive weight map
+    plot_weight_map(
+        reconstructions["Adaptive TV"][0],
+        weights[0],
+        os.path.join(args.out, "lambda_map.png"),
+    )
+    # Row profile
+    row_energy = torch.abs(
+        images[0, :, :, 1:] - images[0, :, :, :-1]
+    ).sum(dim=(0, 2))
     row = int(row_energy.argmax())
-    plot_row_profile(X[0], {k: v[0] for k, v in recon.items()}, row, os.path.join(a.out, "row_profile.png"))
-
-    # ---- machine-readable summary
-    summary = {"args": vars(a),
-                "selected": {"lam_ftv": lam_ftv, "lam0": lam0, "kappa": kappa},
-                "atv_objective_history": hist,
-                "metrics": {k: {m: {"mean": float(v.mean()), "std": float(v.std())} for m, v in r.items()}
-                            for k, r in results.items()},
-                "per_image": {nm: {k: {m: float(v[i]) for m, v in r.items()} for k, r in results.items()}
-                                for i, nm in enumerate(names)},
-                "time_s": times}
-    with open(os.path.join(a.out, "metrics.json"), "w") as f:
-        json.dump(summary, f, indent=2)
-    if a.image:
-        print("\nPer-image PSNR (dB):")
-        for i, nm in enumerate(names):
-            print(f"  {nm:<20}" + "  ".join(f"{k}: {r['psnr'][i]:.2f}" for k, r in results.items()))
-    print(f"\nSaved to ./{a.out}/ : comparison_grid.png, lambda_map.png, row_profile.png, "
-            f"metrics.json, images/<name>/*.png")
-
-
+    plot_row_profile(
+        images[0],
+        {
+            name: reconstruction[0]
+            for name, reconstruction in reconstructions.items()
+        },
+        row,
+        os.path.join(args.out, "row_profile.png"),
+    )
+# 7. MAIN APPLICATION
+def main():
+    args = parse_args()
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    if args.device == "auto":
+        device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+    else:
+        device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is not available.")
+    os.makedirs(args.out, exist_ok=True)
+    print(f"Device: {device}")
+    print(f"Input: {args.image}")
+    # Load user images
+    images, names = load_input_data(args)
+    print(f"Loaded {len(images)} image(s)")
+    print(f"Image shape: {tuple(images.shape[1:])}")
+    # Degrade images
+    observations, mask = degrade(
+        images,
+        missing_ratio=args.missing,
+        sigma=args.sigma,
+        kind=args.mask,
+        seed=args.seed,
+        block_size=args.block_size,
+    )
+    actual_missing = 1.0 - mask.mean().item()
+    print(f"\nDegradation settings:")
+    print(f"Missing ratio: {actual_missing:.2%}")
+    print(f"Noise sigma: {args.sigma}")
+    print(f"Mask type: {args.mask}")
+    # Reconstruct
+    (
+        nearest,
+        reconstructions,
+        timings,
+        weights,
+        history,
+    ) = reconstruct_images(
+        observations,
+        mask,
+        args,
+        device,
+    )
+    print("\nAdaptive TV objective history:")
+    print(" -> ".join(f"{value:.3f}" for value in history))
+    # Evaluate
+    results = evaluate_reconstructions(
+        images,
+        nearest,
+        reconstructions,
+    )
+    print("\n" + summarize(results, timings))
+    # Save figures
+    save_results(
+        images,
+        observations,
+        names,
+        reconstructions,
+        nearest,
+        results,
+        weights,
+        args,
+    )
+    # Save metrics
+    summary = {
+        "arguments": vars(args),
+        "degradation": {
+            "requested_missing_ratio": args.missing,
+            "actual_missing_ratio": actual_missing,
+            "noise_sigma": args.sigma,
+            "mask_type": args.mask,
+            "block_size": args.block_size,
+        },
+        "metrics": {
+            method: {
+                metric: {
+                    "mean": float(values.mean()),
+                    "std": float(values.std()),
+                }
+                for metric, values in scores.items()
+            }
+            for method, scores in results.items()
+        },
+        "per_image": {
+            name: {
+                method: {
+                    metric: float(values[index])
+                    for metric, values in scores.items()
+                }
+                for method, scores in results.items()
+            }
+            for index, name in enumerate(names)
+        },
+        "timings": timings,
+        "adaptive_tv_history": history,
+    }
+    with open(
+        os.path.join(args.out, "metrics.json"),
+        "w",
+    ) as file:
+        json.dump(summary, file, indent=4)
+    print(f"\nResults saved in: {args.out}")
 if __name__ == "__main__":
     main()
