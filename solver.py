@@ -1,3 +1,4 @@
+
 """solver.py -- variational solvers for   min_x  1/2 ||M (.) x - y||^2 + R(x).
 
 Fixed TV (FTV)       R(x) = lam * sum_ij ||grad x_ij||_2
@@ -177,7 +178,15 @@ def dip_adaptive_tv(y, M, x_pilot, lam0, kappa, n_iter: int = 800, lr: float = 1
                     reweight_every: int = 100, ema: float = 0.95, grad_sigma: float = 0.0,
                     z_ch: int = 8, base: int = 16, noise_std: float = 1 / 30.0,
                     device: str | torch.device | None = None, seed: int = 0) -> torch.Tensor:
-    """One fresh network per image (DIP is per-image, no training set)."""
+    """One fresh network per image (DIP is per-image, no training set).
+
+    ema controls exponential moving average of network outputs:
+    0.95 = strong averaging, 0.80 = less averaging, 0.50 = more responsive,
+    0.00 = use the latest network output without averaging.
+    """
+    if not 0.0 <= ema < 1.0:
+        raise ValueError("ema must be in the range [0.0, 1.0).")
+
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     outs = [_dip_single(y[b:b + 1], M[b:b + 1], x_pilot[b:b + 1], lam0, kappa, n_iter, lr,
                         reweight_every, ema, grad_sigma, z_ch, base, noise_std, dev, seed + b)

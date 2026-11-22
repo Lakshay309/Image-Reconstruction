@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python
 """
 Image Reconstruction Pipeline
@@ -32,6 +33,7 @@ from visualize import (
     plot_weight_map,
     save_individual,
 )
+
 # 1. COMMAND-LINE ARGUMENTS
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -103,6 +105,12 @@ def parse_args():
     dip_group.add_argument("--hybrid", action="store_true")
     dip_group.add_argument("--dip_iters", type=int, default=800)
     dip_group.add_argument("--dip_lr", type=float, default=1e-2)
+    dip_group.add_argument(
+        "--ema",
+        type=float,
+        default=0.95,
+        help="EMA coefficient for DIP output averaging (default: 0.95)"
+    )
     # Validate arguments
     args = parser.parse_args()
     if not 0 <= args.missing <= 0.9:
@@ -113,6 +121,8 @@ def parse_args():
         parser.error("--block_size must be at least 2")
     if args.dip_lr <= 0:
         parser.error("--dip_lr must be positive")
+    if not 0.0 <= args.ema < 1.0:
+        parser.error("--ema must be between 0.0 (inclusive) and 1.0 (exclusive)")
     positive_args = [
         "size",
         "ftv_iters",
@@ -127,6 +137,7 @@ def parse_args():
     if args.n_images is not None and args.n_images <= 0:
         parser.error("--n_images must be positive")
     return args
+
 # 2. PARAMETER TUNING
 def tune_parameters(X, Y, M, args, device):
     Y = Y.to(device)
@@ -174,6 +185,7 @@ def tune_parameters(X, Y, M, args, device):
                 best_lam0 = lam0
                 best_kappa = kappa
     return best_ftv_lambda, best_lam0, best_kappa
+
 # 3. IMAGE LOADING
 def load_input_data(args):
     images, names = load_user_images(
@@ -188,6 +200,7 @@ def load_input_data(args):
             f"No supported images found at: {args.image}"
         )
     return images, names
+
 # 4. IMAGE RECONSTRUCTION
 def reconstruct_images(Y, M, args, device):
     Y = Y.to(device)
@@ -231,6 +244,7 @@ def reconstruct_images(Y, M, args, device):
             args.kappa,
             n_iter=args.dip_iters,
             lr=args.dip_lr,
+            ema=args.ema,
             grad_sigma=args.grad_sigma,
             device=device,
             seed=args.seed,
@@ -238,6 +252,7 @@ def reconstruct_images(Y, M, args, device):
         reconstructions["Adaptive TV + DIP"] = hybrid.cpu()
         timings["Adaptive TV + DIP"] = time.time() - start
     return nearest, reconstructions, timings, weights, history
+
 # 5. EVALUATION
 def evaluate_reconstructions(images, nearest, reconstructions):
     results = OrderedDict()
@@ -245,6 +260,7 @@ def evaluate_reconstructions(images, nearest, reconstructions):
     for name, reconstruction in reconstructions.items():
         results[name] = evaluate(images, reconstruction)
     return results
+
 # 6. VISUALIZATION AND SAVING
 def save_results(
     images,
@@ -297,6 +313,7 @@ def save_results(
         row,
         os.path.join(args.out, "row_profile.png"),
     )
+
 # 7. MAIN APPLICATION
 def main():
     args = parse_args()
@@ -403,5 +420,6 @@ def main():
     ) as file:
         json.dump(summary, file, indent=4)
     print(f"\nResults saved in: {args.out}")
+
 if __name__ == "__main__":
     main()
