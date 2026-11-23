@@ -1,0 +1,14 @@
+python train_or_run.py `
+  --image "C:\Users\lakshay\OneDrive\Pictures\Screenshots\Screenshot 2026-11-19 030635.png" `
+  --size 512 --color --fit crop `
+  --missing 0.10 --mask block --sigma 0.08 --block_size 8 `
+  --seed 0 --device cuda `
+  --lam_ftv 0.08 --ftv_iters 400 `
+  --lam0 0.12 --kappa 0.05 --n_outer 6 --n_inner 150 --pilot_iters 300 `
+  --hybrid `
+  --dip_iters 1200 --dip_lr 0.002 `
+  --dip_patience 120 --dip_min_iters 150 --dip_eval_every 10 `
+  --dip_val_fraction 0.10 --dip_reweight_every 100 `
+  --dip_anchor_weight 0.05 --dip_min_delta 0.00001 `
+  --dip_noise_std 0.033333 --dip_channels 16 --dip_base 32 --dip_depth 4 `
+  --ema 0.95 --out results_large_dip

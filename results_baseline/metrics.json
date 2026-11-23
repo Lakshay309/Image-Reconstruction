@@ -1,0 +1,131 @@
+{
+    "arguments": {
+        "image": "C:\\Users\\lakshay\\OneDrive\\Pictures\\Screenshots\\Screenshot 2026-11-19 030635.png",
+        "n_images": null,
+        "size": 512,
+        "color": true,
+        "fit": "crop",
+        "missing": 0.1,
+        "mask": "block",
+        "sigma": 0.08,
+        "block_size": 8,
+        "seed": 0,
+        "device": "auto",
+        "out": "results_baseline",
+        "lam_ftv": 0.08,
+        "ftv_iters": 400,
+        "lam0": 0.12,
+        "kappa": 0.05,
+        "n_outer": 6,
+        "n_inner": 150,
+        "pilot_iters": 300,
+        "grad_sigma": 0.0,
+        "hybrid": true,
+        "dip_iters": 800,
+        "dip_lr": 0.01,
+        "ema": 0.95
+    },
+    "degradation": {
+        "requested_missing_ratio": 0.1,
+        "actual_missing_ratio": 0.09999847412109375,
+        "noise_sigma": 0.08,
+        "mask_type": "block",
+        "block_size": 8
+    },
+    "metrics": {
+        "Nearest fill": {
+            "psnr": {
+                "mean": 21.437956035416352,
+                "std": 0.0
+            },
+            "ssim": {
+                "mean": 0.5202616351058741,
+                "std": 0.0
+            },
+            "edge_psnr": {
+                "mean": 19.136228175021436,
+                "std": 0.0
+            }
+        },
+        "Fixed TV": {
+            "psnr": {
+                "mean": 26.821693774349523,
+                "std": 0.0
+            },
+            "ssim": {
+                "mean": 0.8620186165025565,
+                "std": 0.0
+            },
+            "edge_psnr": {
+                "mean": 22.003811147823804,
+                "std": 0.0
+            }
+        },
+        "Adaptive TV": {
+            "psnr": {
+                "mean": 23.82414725445985,
+                "std": 0.0
+            },
+            "ssim": {
+                "mean": 0.6991150411711978,
+                "std": 0.0
+            },
+            "edge_psnr": {
+                "mean": 19.12904609165913,
+                "std": 0.0
+            }
+        },
+        "Adaptive TV + DIP": {
+            "psnr": {
+                "mean": 22.326924696063905,
+                "std": 0.0
+            },
+            "ssim": {
+                "mean": 0.688024150731635,
+                "std": 0.0
+            },
+            "edge_psnr": {
+                "mean": 20.224411385453877,
+                "std": 0.0
+            }
+        }
+    },
+    "per_image": {
+        "Screenshot 2026-11-19 030635": {
+            "Nearest fill": {
+                "psnr": 21.437956035416352,
+                "ssim": 0.5202616351058741,
+                "edge_psnr": 19.136228175021436
+            },
+            "Fixed TV": {
+                "psnr": 26.821693774349523,
+                "ssim": 0.8620186165025565,
+                "edge_psnr": 22.003811147823804
+            },
+            "Adaptive TV": {
+                "psnr": 23.82414725445985,
+                "ssim": 0.6991150411711978,
+                "edge_psnr": 19.12904609165913
+            },
+            "Adaptive TV + DIP": {
+                "psnr": 22.326924696063905,
+                "ssim": 0.688024150731635,
+                "edge_psnr": 20.224411385453877
+            }
+        }
+    },
+    "timings": {
+        "Nearest fill": 0.03753995895385742,
+        "Fixed TV": 0.7905070781707764,
+        "Adaptive TV": 1.979027509689331,
+        "Adaptive TV + DIP": 52.058658599853516
+    },
+    "adaptive_tv_history": [
+        2500.417724609375,
+        2453.406982421875,
+        2434.61962890625,
+        2425.84228515625,
+        2421.09033203125,
+        2418.31884765625
+    ]
+}

@@ -103,13 +103,25 @@ def parse_args():
     # Deep Image Prior
     dip_group = parser.add_argument_group("Deep Image Prior")
     dip_group.add_argument("--hybrid", action="store_true")
-    dip_group.add_argument("--dip_iters", type=int, default=800)
-    dip_group.add_argument("--dip_lr", type=float, default=1e-2)
+    dip_group.add_argument("--dip_iters", type=int, default=1200)
+    dip_group.add_argument("--dip_lr", type=float, default=1e-3)
+    dip_group.add_argument("--dip_patience", type=int, default=120)
+    dip_group.add_argument("--dip_min_iters", type=int, default=150)
+    dip_group.add_argument("--dip_eval_every", type=int, default=10)
+    dip_group.add_argument("--dip_val_fraction", type=float, default=0.10)
+    dip_group.add_argument("--dip_reweight_every", type=int, default=100)
+    dip_group.add_argument("--dip_anchor_weight", type=float, default=0.0)
+    dip_group.add_argument("--dip_min_delta", type=float, default=1e-5)
+    dip_group.add_argument("--dip_tv_scale", type=float, default=None)
+    dip_group.add_argument("--dip_noise_std", type=float, default=0.0)
+    dip_group.add_argument("--dip_channels", type=int, default=16)
+    dip_group.add_argument("--dip_base", type=int, default=16)
+    dip_group.add_argument("--dip_depth", type=int, default=4)
     dip_group.add_argument(
         "--ema",
         type=float,
-        default=0.95,
-        help="EMA coefficient for DIP output averaging (default: 0.95)"
+        default=0.90,
+        help="EMA coefficient for DIP output averaging (default: 0.90)"
     )
     # Validate arguments
     args = parser.parse_args()
@@ -123,6 +135,20 @@ def parse_args():
         parser.error("--dip_lr must be positive")
     if not 0.0 <= args.ema < 1.0:
         parser.error("--ema must be between 0.0 (inclusive) and 1.0 (exclusive)")
+    if not 0.0 < args.dip_val_fraction < 0.5:
+        parser.error("--dip_val_fraction must be between 0 and 0.5")
+    if args.dip_patience <= 0 or args.dip_eval_every <= 0 or args.dip_reweight_every <= 0:
+        parser.error("--dip_patience, --dip_eval_every and --dip_reweight_every must be positive")
+    if args.dip_min_iters < 0 or args.dip_anchor_weight < 0 or args.dip_noise_std < 0:
+        parser.error("--dip_min_iters, --dip_anchor_weight and --dip_noise_std cannot be negative")
+    if args.dip_anchor_weight != 0:
+        parser.error("DIP-TV uses data fidelity + adaptive TV; remove the pilot anchor (--dip_anchor_weight 0)")
+    if args.dip_min_delta < 0 or (args.dip_tv_scale is not None and args.dip_tv_scale < 0):
+        parser.error("--dip_min_delta and --dip_tv_scale cannot be negative")
+    if args.dip_channels <= 0 or args.dip_base <= 0 or args.dip_depth <= 0:
+        parser.error("--dip_channels, --dip_base and --dip_depth must be positive")
+    if args.size % (2 ** args.dip_depth) != 0:
+        parser.error("--size must be divisible by 2**dip_depth")
     positive_args = [
         "size",
         "ftv_iters",
@@ -236,7 +262,7 @@ def reconstruct_images(Y, M, args, device):
     # Adaptive TV + DIP
     if args.hybrid:
         start = time.time()
-        hybrid = dip_adaptive_tv(
+        hybrid, dip_diagnostics = dip_adaptive_tv(
             Y,
             M,
             adaptive,
@@ -244,14 +270,29 @@ def reconstruct_images(Y, M, args, device):
             args.kappa,
             n_iter=args.dip_iters,
             lr=args.dip_lr,
+            reweight_every=args.dip_reweight_every,
             ema=args.ema,
             grad_sigma=args.grad_sigma,
+            z_ch=args.dip_channels,
+            base=args.dip_base,
+            depth=args.dip_depth,
+            noise_std=args.dip_noise_std,
             device=device,
             seed=args.seed,
+            val_fraction=args.dip_val_fraction,
+            patience=args.dip_patience,
+            min_iters=args.dip_min_iters,
+            eval_every=args.dip_eval_every,
+            anchor_weight=args.dip_anchor_weight,
+            min_delta=args.dip_min_delta,
+            tv_scale=args.dip_tv_scale,
+            return_info=True,
         )
         reconstructions["Adaptive TV + DIP"] = hybrid.cpu()
         timings["Adaptive TV + DIP"] = time.time() - start
-    return nearest, reconstructions, timings, weights, history
+    else:
+        dip_diagnostics = []
+    return nearest, reconstructions, timings, weights, history, dip_diagnostics
 
 # 5. EVALUATION
 def evaluate_reconstructions(images, nearest, reconstructions):
@@ -329,6 +370,16 @@ def main():
         raise RuntimeError("CUDA was requested but is not available.")
     os.makedirs(args.out, exist_ok=True)
     print(f"Device: {device}")
+    if args.hybrid:
+        print(
+            "DIP model: "
+            f"base={args.dip_base}, depth={args.dip_depth}, "
+            f"input_channels={args.dip_channels}, "
+            f"generator=DIP skip U-Net (per-image optimization; no pretrained weights)"
+        )
+        if device.type == "cuda":
+            print(f"GPU: {torch.cuda.get_device_name(device)}")
+            print(f"CUDA/PyTorch: {torch.version.cuda}")
     print(f"Input: {args.image}")
     # Load user images
     images, names = load_input_data(args)
@@ -355,6 +406,7 @@ def main():
         timings,
         weights,
         history,
+        dip_diagnostics,
     ) = reconstruct_images(
         observations,
         mask,
@@ -413,6 +465,7 @@ def main():
         },
         "timings": timings,
         "adaptive_tv_history": history,
+        "dip_diagnostics": dip_diagnostics,
     }
     with open(
         os.path.join(args.out, "metrics.json"),
