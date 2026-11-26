@@ -24,6 +24,7 @@ from metrics import evaluate, psnr, summarize
 from solver import (
     adaptive_tv,
     dip_adaptive_tv,
+    dip_ablation,
     fixed_tv,
     nearest_fill,
 )
@@ -88,6 +89,11 @@ def parse_args():
         choices=["auto", "cpu", "cuda"]
     )
     execution_group.add_argument("--out", default="results")
+    execution_group.add_argument(
+        "--ablation",
+        action="store_true",
+        help="Run all six ablation configurations on the same degraded input",
+    )
     # Fixed TV
     ftv_group = parser.add_argument_group("Fixed TV")
     ftv_group.add_argument("--lam_ftv", type=float, default=0.08)
@@ -259,8 +265,48 @@ def reconstruct_images(Y, M, args, device):
     )
     reconstructions["Adaptive TV"] = adaptive.cpu()
     timings["Adaptive TV"] = time.time() - start
+
+    # DIP-only and Fixed-TV + DIP are included in the ablation run.
+    if args.ablation:
+        common_dip = dict(
+            n_iter=args.dip_iters,
+            lr=args.dip_lr,
+            ema=args.ema,
+            z_ch=args.dip_channels,
+            base=args.dip_base,
+            depth=args.dip_depth,
+            noise_std=args.dip_noise_std,
+            device=device,
+            seed=args.seed,
+            val_fraction=args.dip_val_fraction,
+            patience=args.dip_patience,
+            min_iters=args.dip_min_iters,
+            min_delta=args.dip_min_delta,
+            eval_every=args.dip_eval_every,
+            return_info=True,
+        )
+        start = time.time()
+        dip_only, dip_only_info = dip_ablation(
+            Y, M, mode="dip_only", lam=args.lam_ftv, **common_dip
+        )
+        reconstructions["DIP only"] = dip_only.cpu()
+        timings["DIP only"] = time.time() - start
+
+        start = time.time()
+        fixed_dip, fixed_dip_info = dip_ablation(
+            Y, M, mode="fixed_tv_dip", lam=args.lam_ftv, **common_dip
+        )
+        reconstructions["Fixed TV + DIP"] = fixed_dip.cpu()
+        timings["Fixed TV + DIP"] = time.time() - start
+        dip_ablation_diagnostics = {
+            "DIP only": dip_only_info,
+            "Fixed TV + DIP": fixed_dip_info,
+        }
+    else:
+        dip_ablation_diagnostics = {}
+
     # Adaptive TV + DIP
-    if args.hybrid:
+    if args.hybrid or args.ablation:
         start = time.time()
         hybrid, dip_diagnostics = dip_adaptive_tv(
             Y,
@@ -292,6 +338,11 @@ def reconstruct_images(Y, M, args, device):
         timings["Adaptive TV + DIP"] = time.time() - start
     else:
         dip_diagnostics = []
+    if args.ablation:
+        dip_diagnostics = {
+            **dip_ablation_diagnostics,
+            "Adaptive TV + DIP": dip_diagnostics,
+        }
     return nearest, reconstructions, timings, weights, history, dip_diagnostics
 
 # 5. EVALUATION
@@ -381,6 +432,9 @@ def main():
             print(f"GPU: {torch.cuda.get_device_name(device)}")
             print(f"CUDA/PyTorch: {torch.version.cuda}")
     print(f"Input: {args.image}")
+    if args.ablation:
+        print("Ablation mode: Nearest Fill, Fixed TV, Adaptive TV, DIP only, "
+              "Fixed TV + DIP, Adaptive TV + DIP")
     # Load user images
     images, names = load_input_data(args)
     print(f"Loaded {len(images)} image(s)")
@@ -422,6 +476,27 @@ def main():
         reconstructions,
     )
     print("\n" + summarize(results, timings))
+    if dip_diagnostics:
+        print("\nDIP ablation diagnostics (baseline comparisons do not replace DIP outputs):")
+        for method, entries in dip_diagnostics.items():
+            if isinstance(entries, list):
+                for index, entry in enumerate(entries):
+                    flag = entry.get("dip_beats_baseline", entry.get("dip_beats_training_pilot"))
+                    print(
+                        f"  {method} [image {index + 1}]: "
+                        f"selected={entry.get('selected_method', 'unknown')}, "
+                        f"beats_baseline={flag}, "
+                        f"best_iteration={entry.get('best_iteration')}, "
+                        f"validation_mse={entry.get('best_validation_mse')}"
+                    )
+            elif isinstance(entries, dict):
+                flag = entries.get("dip_beats_baseline", entries.get("dip_beats_training_pilot"))
+                print(
+                    f"  {method}: selected={entries.get('selected_method', 'unknown')}, "
+                    f"beats_baseline={flag}, "
+                    f"best_iteration={entries.get('best_iteration')}, "
+                    f"validation_mse={entries.get('best_validation_mse')}"
+                )
     # Save figures
     save_results(
         images,

@@ -183,13 +183,9 @@ def _masked_mse(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) ->
     return ((pred - target).square() * expanded).sum() / expanded.sum().clamp_min(1.0)
 
 
-def _anisotropic_tv_density(x: torch.Tensor) -> torch.Tensor:
-    """Per-pixel anisotropic TV density, summed across colour channels."""
-    dx = x[..., :, 1:] - x[..., :, :-1]
-    dy = x[..., 1:, :] - x[..., :-1, :]
-    dx = F.pad(dx.abs(), (0, 1, 0, 0))
-    dy = F.pad(dy.abs(), (0, 0, 0, 1))
-    return (dx + dy).sum(dim=1, keepdim=True)
+def _isotropic_tv_density(x: torch.Tensor) -> torch.Tensor:
+    """Per-pixel vectorial/isotropic TV density, matching ``grad_mag``."""
+    return grad_mag(x)
 
 
 def _fit_dip(y, train_mask, W, *, z_ch, base, depth, n_iter, lr,
@@ -222,7 +218,7 @@ def _fit_dip(y, train_mask, W, *, z_ch, base, depth, n_iter, lr,
         zin = z + noise_std * torch.randn_like(z) if noise_std > 0 else z
         out = net(zin)
         data_loss = _masked_mse(out, y, train_mask)
-        tv_map = _anisotropic_tv_density(out)
+        tv_map = _isotropic_tv_density(out)
         tv_loss = (W * tv_map).mean()
         loss = data_loss + tv_loss
         if not torch.isfinite(loss):
@@ -307,15 +303,19 @@ def _dip_single(y, M, x_full_pilot, lam0, kappa, n_iter, lr, reweight_every,
 
     info["training_pilot_validation_mse"] = pilot_val
     info["full_data_pilot_validation_mse"] = float(_masked_mse(x_full_pilot, y, val_mask).cpu())
-    info["dip_selected_on_validation"] = bool(candidate is not None and info["best_validation_mse"] < pilot_val - min_delta)
+    info["dip_beats_training_pilot"] = bool(
+        candidate is not None and info["best_validation_mse"] < pilot_val - min_delta
+    )
+    info["dip_selected_on_validation"] = info["dip_beats_training_pilot"]
     info["full_data_refit"] = False
-    if not info["dip_selected_on_validation"]:
-        info["selected_method"] = "adaptive_tv_fallback"
-        return x_full_pilot.detach().cpu(), info
+    if candidate is None or info["best_iteration"] <= 0:
+        raise RuntimeError(
+            "Adaptive TV + DIP optimization did not produce a valid validation-selected output. "
+            "Inspect the loss/gradient diagnostics; no TV fallback was substituted."
+        )
 
-    # Refit from a fresh initialization using ALL observations for the number
-    # of iterations selected on the held-out split. This is standard hold-out
-    # model selection followed by full-measurement reconstruction.
+    # The pilot comparison is diagnostic only. Always refit the actual DIP
+    # candidate using all observations for the validation-selected iteration count.
     full_weights = (adaptive_weights(x_full_pilot, lam0, kappa, grad_sigma) / max(lam0, 1e-12)).clamp(0.05, 1.0) * tv_coeff
     refit, refit_info = _fit_dip(
         y, M, full_weights, z_ch=z_ch, base=base, depth=depth,
@@ -342,11 +342,11 @@ def dip_adaptive_tv(
 ):
     """Adaptive-TV-regularized DIP with honest hold-out selection.
 
-    The objective is masked MSE + weighted anisotropic TV. The generator is
+    The objective is masked MSE + weighted vectorial/isotropic TV. The generator is
     randomly initialized and optimized per image; no external dataset or
     pretrained network is used. A training-only ATV pilot is the validation
-    comparator. Full-data ATV is used only if the learned candidate fails to
-    beat that comparator; otherwise a fresh DIP refit uses every observation.
+    comparator. The comparison is diagnostic only: a fresh DIP refit uses
+    every observation regardless of whether DIP beats the pilot.
     ``anchor_weight`` remains as a deprecated compatibility argument and is
     intentionally not used: a pilot anchor would change the DIP-TV objective.
     """
@@ -372,6 +372,98 @@ def dip_adaptive_tv(
         diagnostics.append(info)
     result = torch.cat(outputs, dim=0)
     return (result, diagnostics) if return_info else result
+
+
+# --------------------------------------------------------------------------------------
+# DIP ablation baselines: DIP only and Fixed-TV + DIP
+# --------------------------------------------------------------------------------------
+def _dip_baseline_single(
+    y, M, mode, lam, n_iter, lr, ema, z_ch, base, depth, noise_std,
+    dev, seed, val_fraction, patience, min_iters, min_delta, eval_every,
+):
+    """DIP-only or fixed-TV-regularized DIP; baseline is diagnostic, never a fallback."""
+    y, M = y.to(dev), M.to(dev)
+    train_mask, val_mask = _split_observed_mask(M, val_fraction, seed + 7919)
+
+    if mode == "dip_only":
+        train_pilot = nearest_fill(y, train_mask).to(dev).clamp(0, 1)
+        train_weights = torch.zeros_like(train_mask)
+        full_weights = torch.zeros_like(M)
+    elif mode == "fixed_tv_dip":
+        train_pilot = fixed_tv(y, train_mask, lam, n_iter=300).to(dev)
+        train_weights = torch.full_like(train_mask, float(lam))
+        full_weights = torch.full_like(M, float(lam))
+    else:
+        raise ValueError(f"Unknown DIP baseline mode: {mode}")
+
+    pilot_val = float(_masked_mse(train_pilot, y, val_mask).cpu())
+    candidate, info = _fit_dip(
+        y, train_mask, train_weights,
+        z_ch=z_ch, base=base, depth=depth, n_iter=n_iter, lr=lr,
+        noise_std=noise_std, ema=ema, eval_mask=val_mask, eval_target=y,
+        eval_every=eval_every, patience=patience, min_iters=min_iters,
+        min_delta=min_delta, seed=seed, device=dev, reweight_every=0,
+        lam0=lam, kappa=0.05, grad_sigma=0.0, tv_coefficient=lam,
+    )
+    info["pilot_validation_mse"] = pilot_val
+    info["dip_beats_baseline"] = bool(
+        candidate is not None and info["best_validation_mse"] < pilot_val - min_delta
+    )
+    info["dip_selected_on_validation"] = info["dip_beats_baseline"]
+    if candidate is None or info["best_iteration"] <= 0:
+        raise RuntimeError(
+            f"{mode} optimization did not produce a valid validation-selected output. "
+            "Inspect the loss/gradient diagnostics; no baseline fallback was substituted."
+        )
+
+    # The baseline is diagnostic only; always refit and return the actual DIP
+    # reconstruction so the ablation label corresponds to the method run.
+    refit, refit_info = _fit_dip(
+        y, M, full_weights,
+        z_ch=z_ch, base=base, depth=depth,
+        n_iter=max(1, info["best_iteration"]), lr=lr,
+        noise_std=noise_std, ema=ema, eval_mask=None, eval_target=None,
+        eval_every=eval_every, patience=patience, min_iters=min_iters,
+        min_delta=min_delta, seed=seed, device=dev, reweight_every=0,
+        lam0=lam, kappa=0.05, grad_sigma=0.0, tv_coefficient=lam,
+    )
+    info["full_data_refit"] = True
+    info["selected_method"] = mode
+    info["refit_diagnostics"] = refit_info
+    return refit.clamp(0, 1).detach().cpu(), info
+
+
+def dip_ablation(
+    y, M, mode: str, lam: float = 0.08, n_iter: int = 1200,
+    lr: float = 1e-3, ema: float = 0.90, z_ch: int = 16,
+    base: int = 16, depth: int = 4, noise_std: float = 0.0,
+    device=None, seed: int = 0, val_fraction: float = 0.10,
+    patience: int = 120, min_iters: int = 150, min_delta: float = 1e-5,
+    eval_every: int = 10, return_info: bool = False,
+):
+    """Run DIP-only or Fixed-TV+DIP, independently optimizing each image.
+
+    The observed pixels are split for iteration selection; a fresh generator is
+    then refit using all observations. Baselines are diagnostic only and never
+    replace the DIP output. No external training dataset is used.
+    """
+    if mode not in {"dip_only", "fixed_tv_dip"}:
+        raise ValueError("mode must be 'dip_only' or 'fixed_tv_dip'")
+    if lam < 0 or n_iter <= 0 or lr <= 0:
+        raise ValueError("lam must be non-negative; n_iter and lr must be positive")
+    dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    outputs, diagnostics = [], []
+    for b in range(y.shape[0]):
+        out, info = _dip_baseline_single(
+            y[b:b+1], M[b:b+1], mode, lam, n_iter, lr, ema, z_ch,
+            base, depth, noise_std, dev, seed + b, val_fraction,
+            patience, min_iters, min_delta, eval_every,
+        )
+        outputs.append(out)
+        diagnostics.append(info)
+    result = torch.cat(outputs, dim=0)
+    return (result, diagnostics) if return_info else result
+
 
 
 # --------------------------------------------------------------------------------------

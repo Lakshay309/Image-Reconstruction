@@ -71,3 +71,6 @@ cover/
 *.swp
 *.swo
 .DS_Store
+
+
+data/
