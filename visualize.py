@@ -89,3 +89,49 @@ def save_individual(out_dir: str, names: list, x, y, recon: dict):
                 plt.imsave(os.path.join(d, key + ".png"), a[0], cmap="gray", vmin=0, vmax=1)
             else:
                 plt.imsave(os.path.join(d, key + ".png"), a.transpose(1, 2, 0))
+
+def plot_metric_summary(image_level_frame, out_dir: str):
+    """Generate per-image distribution plots for PSNR, SSIM and Edge-PSNR."""
+    import pandas as pd
+    os.makedirs(out_dir, exist_ok=True)
+    metrics = [
+        ("psnr", "PSNR (dB)", "psnr_comparison.png"),
+        ("ssim", "SSIM", "ssim_comparison.png"),
+        ("edge_psnr", "Edge-PSNR (dB)", "edge_psnr_comparison.png"),
+    ]
+    for metric, label, filename in metrics:
+        methods = list(image_level_frame["method"].drop_duplicates())
+        data = [
+            image_level_frame.loc[image_level_frame.method == method, metric].dropna().to_numpy()
+            for method in methods
+        ]
+        fig, ax = plt.subplots(figsize=(max(9, len(methods) * 1.5), 5))
+        # Matplotlib renamed the `labels` argument to `tick_labels`.
+        # Support both newer and older Matplotlib releases.
+        try:
+            ax.boxplot(data, tick_labels=methods, showmeans=True)
+        except TypeError as exc:
+            if "tick_labels" not in str(exc):
+                raise
+            ax.boxplot(data, labels=methods, showmeans=True)
+        ax.set_ylabel(label)
+        ax.set_title(f"{label} across reference images (seed-averaged per image)")
+        ax.tick_params(axis="x", rotation=25)
+        ax.grid(axis="y", alpha=0.25)
+        fig.tight_layout()
+        _save(fig, os.path.join(out_dir, filename))
+
+    # Mean with standard-deviation error bars across independent images.
+    for metric, label, filename in metrics:
+        grouped = image_level_frame.groupby("method")[metric]
+        means, stds = grouped.mean(), grouped.std(ddof=1).fillna(0)
+        fig, ax = plt.subplots(figsize=(9, 5))
+        ax.bar(means.index, means.values, yerr=stds.values, capsize=4)
+        ax.set_ylabel(label)
+        ax.set_title(f"Mean {label} ± SD across images")
+        ax.tick_params(axis="x", rotation=25)
+        ax.grid(axis="y", alpha=0.25)
+        fig.tight_layout()
+        _save(fig, os.path.join(out_dir, filename.replace(".png", "_mean_sd.png")))
+
+
